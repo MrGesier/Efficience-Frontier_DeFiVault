@@ -119,7 +119,6 @@ data["category"] = data.apply(classify, axis=1)
 data["color"] = data["category"].map(COLOR_MAP)
 st.success(f"Loaded {len(data)} vaults — {len(data)-len(skipped_ids)} with history.")
 
-# Cap APY and vol outliers
 data["mean_return"] = np.clip(data["mean_return"], 0, 0.5)
 data["volatility"] = np.clip(data["volatility"], 0, 0.3)
 
@@ -128,24 +127,57 @@ data["volatility"] = np.clip(data["volatility"], 0, 0.3)
 # =========================================================
 with st.sidebar:
     st.header("⚙️ Interactive Controls")
+
     cats = sorted(data["category"].unique().tolist())
-    selected_cats = st.multiselect("Filter by Category", cats, default=cats, help="Filter vault categories to include.")
+    selected_cats = st.multiselect("Filter by Category", cats, default=cats)
     uni = data[data["category"].isin(selected_cats)].copy()
 
-    chosen = st.multiselect(
-        "Vault Universe (optional)",
-        options=uni["name"].tolist(),
-        default=[],
-        help="Select specific vaults to focus on (leave empty for all)."
-    )
+    chosen = st.multiselect("Vault Universe (optional)", options=uni["name"].tolist(), default=[])
     if chosen:
         uni = uni[uni["name"].isin(chosen)].copy()
 
     target_return_pct = st.slider("🎯 Target Return (APY %)", 0.0, float(max(0.5, uni["mean_return"].max()*100)), 10.0)
-    diversity_pref = st.slider("🌈 Diversity Preference", 0.0, 1.0, 0.5, help="Adjust correlation weight between vaults.")
+    diversity_pref = st.slider("🌈 Diversity Preference", 0.0, 1.0, 0.5)
     max_assets = st.slider("📦 Max Assets", 3, min(25, max(3,len(uni))), 8)
     total_invest = st.number_input("💵 Total Investment (USD)", min_value=1000, max_value=1_000_000, value=50_000)
-    rf = st.number_input("Risk-Free Rate (%)", min_value=0.0, max_value=20.0, value=2.0, step=0.5)
+    rf = st.number_input("Base Risk-Free Rate (%)", min_value=0.0, max_value=20.0, value=5.0, step=0.5)
+
+# =========================================================
+# COUNTERPARTY RISK ADJUSTMENT
+# =========================================================
+st.sidebar.markdown("---")
+st.sidebar.subheader("🧱 Counterparty Risks (adjust risk-free rate)")
+
+with st.sidebar.expander("Select risk factors to apply", expanded=False):
+    col1, col2 = st.columns(2)
+    with col1:
+        depeg = st.checkbox("💸 Stablecoin Depeg", value=True)
+        custodian = st.checkbox("🏦 Custodian / CeFi exposure", value=False)
+        bridge = st.checkbox("🌉 Bridge / Cross-chain", value=True)
+    with col2:
+        infra = st.checkbox("⚙️ Infrastructure / Smart contract", value=True)
+        liquidity = st.checkbox("💧 Liquidity / TVL risk", value=False)
+        governance = st.checkbox("🗳 Governance / Oracle risk", value=False)
+
+penalties = {
+    "depeg": 0.01, "custodian": 0.005, "bridge": 0.007,
+    "infra": 0.008, "liquidity": 0.004, "governance": 0.003
+}
+
+selected_risks, risk_penalty = [], 0
+if depeg: selected_risks.append("Stablecoin Depeg"); risk_penalty += penalties["depeg"]
+if custodian: selected_risks.append("Custodian / CeFi"); risk_penalty += penalties["custodian"]
+if bridge: selected_risks.append("Bridge / Cross-chain"); risk_penalty += penalties["bridge"]
+if infra: selected_risks.append("Infrastructure / Smart contract"); risk_penalty += penalties["infra"]
+if liquidity: selected_risks.append("Liquidity / TVL"); risk_penalty += penalties["liquidity"]
+if governance: selected_risks.append("Governance / Oracle"); risk_penalty += penalties["governance"]
+
+rf_adj = max((rf / 100) - risk_penalty, 0)
+st.sidebar.markdown(f"**Adjusted Risk-Free Rate (rfₐ): `{rf_adj*100:.2f}%`**")
+if selected_risks:
+    st.sidebar.markdown("**Active Risk Factors:**")
+    for r in selected_risks:
+        st.sidebar.markdown(f"- {r}")
 
 # =========================================================
 # DIVERSITY-AWARE COVARIANCE
@@ -183,7 +215,7 @@ def min_var(target_r, mu, cov):
     return res.x if res.success else w0
 
 # =========================================================
-# FRONTIER
+# FRONTIER & RANDOM SIMULATION
 # =========================================================
 tgrid=np.linspace(mu.min(),mu.max(),40)
 front=[]
@@ -193,9 +225,6 @@ for tr in tgrid:
     front.append((r,v))
 frontier_df=pd.DataFrame(front,columns=["return","vol"])
 
-# =========================================================
-# RANDOM PORTFOLIO SIMULATION
-# =========================================================
 N=1500
 rw=np.random.dirichlet(np.ones(len(mu)),size=N)
 r_ret=rw@mu
@@ -205,7 +234,7 @@ rand_df=pd.DataFrame({"return":r_ret*100,"volatility":r_vol*100})
 # =========================================================
 # CAPITAL ALLOCATION LINE (CAL)
 # =========================================================
-rf_dec = rf / 100
+rf_dec = rf_adj
 sharpe=(frontier_df["return"]-rf_dec)/frontier_df["vol"]
 tangent_idx=sharpe.idxmax()
 tangent=frontier_df.loc[tangent_idx]
@@ -213,24 +242,19 @@ x_line=np.linspace(0,frontier_df["vol"].max(),100)
 y_line=rf_dec + (tangent["return"]-rf_dec)/tangent["vol"]*x_line
 
 # =========================================================
-# MAIN TAB LAYOUT
+# LAYOUT
 # =========================================================
 tab1, tab2, tab3 = st.tabs(["📉 Frontier & Portfolio", "🎲 Random Portfolios", "🧩 Correlations & Diversity"])
 
 # --- FRONTIER ---
 with tab1:
     fig=px.scatter(
-        uni,
-        x=uni["volatility"]*100,
-        y=uni["mean_return"]*100,
-        color="category",
-        color_discrete_map=COLOR_MAP,
-        size="tvlUsd",
+        uni,x=uni["volatility"]*100,y=uni["mean_return"]*100,
+        color="category",color_discrete_map=COLOR_MAP,size="tvlUsd",
         hover_data=["name","project","chain","symbol","tvlUsd"],
         labels={"x":"Risk (Volatility %)","y":"Expected Return (APY %)"},
         title="DeFi Vaults — Efficient Frontier with CAL"
     )
-
     fig.add_scatter(x=frontier_df["vol"]*100,y=frontier_df["return"]*100,
                     mode="lines+markers",name="Efficient Frontier",
                     line=dict(color="red",width=2))
@@ -239,14 +263,12 @@ with tab1:
                     line=dict(color="black",width=3))
     st.plotly_chart(fig,use_container_width=True)
 
-    # Vault Universe table
     with st.expander("🧾 Vault Universe (Full List)", expanded=False):
         st.dataframe(
             uni[["name","project","chain","symbol","category","tvlUsd","mean_return","volatility"]],
             use_container_width=True,hide_index=True
         )
 
-    # Optimal Portfolio
     best_idx=(frontier_df["return"]*100 - target_return_pct).abs().idxmin()
     target_r=frontier_df.loc[best_idx,"return"]
     w_full=min_var(target_r,mu,adj_cov)
@@ -264,10 +286,8 @@ with tab1:
     tangent_sharpe=(tangent["return"]-rf_dec)/tangent["vol"]
 
     st.subheader("💰 Optimal Portfolio")
-    st.dataframe(
-        out[["name","project","category","Weight","Allocation (USD)","mean_return","volatility"]],
-        use_container_width=True,hide_index=True
-    )
+    st.dataframe(out[["name","project","category","Weight","Allocation (USD)","mean_return","volatility"]],
+                 use_container_width=True,hide_index=True)
 
     st.markdown(f"""
 ### 🧭 Portfolio Summary
@@ -277,24 +297,25 @@ with tab1:
 - **Volatility:** {port_v*100:.2f}%
 - **Sharpe (tangent):** {tangent_sharpe:.2f}
 - **Vaults Selected:** {(out["Weight"]>0.001).sum()} / {K}
+- **Base Risk-Free Rate:** {rf:.2f}%
+- **Risk Penalty Applied:** {risk_penalty*100:.2f}%
+- **Adjusted Risk-Free (rfₐ):** {rf_adj*100:.2f}%
+- **Active Risks:** {', '.join(selected_risks) if selected_risks else 'None'}
 - **Diversity Preference:** {diversity_pref:.2f}
 - **Last Updated:** {datetime.utcnow().strftime('%Y-%m-%d %H:%M UTC')}
 """)
 
 # --- RANDOM PORTFOLIO SIMULATION ---
 with tab2:
-    fig_rand=px.scatter(
-        rand_df,x="volatility",y="return",
+    fig_rand=px.scatter(rand_df,x="volatility",y="return",
         title="Random Portfolios Simulation — Risk vs Return",
         labels={"volatility":"Risk (Volatility %)","return":"Expected Return (APY %)"},
-        opacity=0.6,color_discrete_sequence=["orange"]
-    )
-    fig_rand.add_scatter(
-        x=frontier_df["vol"]*100,y=frontier_df["return"]*100,
-        mode="lines",name="Efficient Frontier",line=dict(color="red",width=2)
-    )
+        opacity=0.6,color_discrete_sequence=["orange"])
+    fig_rand.add_scatter(x=frontier_df["vol"]*100,y=frontier_df["return"]*100,
+                         mode="lines",name="Efficient Frontier",
+                         line=dict(color="red",width=2))
     st.plotly_chart(fig_rand,use_container_width=True)
-    st.caption("Orange points = randomly generated portfolio allocations. The red curve = efficient frontier.")
+    st.caption("Orange points = randomly generated portfolios. Red curve = efficient frontier.")
 
 # --- CORRELATION TAB ---
 with tab3:
@@ -312,8 +333,4 @@ with tab3:
 - Interpretation: higher entropy & lower mean corr = better diversification.
 """)
 
-st.caption(
-    "Notes: The orange points represent random portfolios, "
-    "the red curve is the efficient frontier, and the black line is the Capital Allocation Line (CAL). "
-    "All APYs > 50% are capped to ensure realistic scales."
-)
+st.caption("All APYs > 50% are capped for scale realism. CAL reflects adjusted risk-free (rfₐ) accounting for selected counterparty risks.")
