@@ -39,3 +39,6 @@ It aggregates live yield data from [DefiLlama](https://defillama.com), classifie
 ```bash
 git clone https://github.com/yourusername/defi-frontier.git
 cd defi-frontier
+
+<img width="1864" height="864" alt="image" src="https://github.com/user-attachments/assets/fc7e08c2-011c-4c24-aac4-04b28a173f59" />
+<img width="1864" height="890" alt="image" src="https://github.com/user-attachments/assets/0d9ae5ae-315d-4f48-89f4-78af356b22a2" />
