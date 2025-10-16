@@ -163,6 +163,7 @@ with st.sidebar:
     max_assets = st.slider("📦 Max Assets", 3, min(25, max(3,len(uni))), 8)
     total_invest = st.number_input("💵 Total Investment (USD)", min_value=1000, max_value=1_000_000, value=50_000)
     rf = st.number_input("Base Risk-Free Rate (%)", min_value=0.0, max_value=50.0, value=15.0, step=0.5)
+    show_cal = st.checkbox("📏 Show CAL (Capital Allocation Line)", value=True)
 
 # =========================================================
 # COUNTERPARTY RISK ADJUSTMENT
@@ -280,9 +281,10 @@ with tab1:
     fig.add_scatter(x=frontier_df["vol"]*100,y=frontier_df["return"]*100,
                     mode="lines+markers",name="Efficient Frontier",
                     line=dict(color="red",width=2))
-    fig.add_scatter(x=x_line*100,y=y_line*100,mode="lines",
-                    name="CAL (risk-free adjusted)",
-                    line=dict(color="black",width=3))
+    if show_cal:
+        fig.add_scatter(x=x_line*100,y=y_line*100,mode="lines",
+                        name="CAL (risk-free adjusted)",
+                        line=dict(color="black",width=3))
     st.plotly_chart(fig,use_container_width=True)
 
     with st.expander("🧾 Vault Universe (Adjusted Returns)", expanded=False):
@@ -338,14 +340,34 @@ with tab2:
 # --- TAB 3 ---
 with tab3:
     st.subheader("🧩 Correlation Matrix (category-aware)")
-    corr_df=pd.DataFrame(corr,index=uni["name"],columns=uni["name"])
-    heat=px.imshow(corr_df,aspect="auto",color_continuous_scale="RdBu",origin="lower",title="Vault Correlation Matrix")
-    st.plotly_chart(heat,use_container_width=True)
 
-    w_safe=w_card[w_card>0]
-    entropy=-np.sum(w_safe*np.log(w_safe))/np.log(len(w_card)) if len(w_card)>0 else 0
-    W=np.outer(w_card,w_card)
-    mean_corr=float((corr*W).sum()) if W.size else 0
+    raw_labels = uni["name"].astype(str).tolist()
+    counts, labels = {}, []
+    for lbl in raw_labels:
+        counts[lbl] = counts.get(lbl, 0) + 1
+        suffix = f" ·{counts[lbl]}" if counts[lbl] > 1 else ""
+        labels.append(f"{lbl}{suffix}")
+
+    corr_df = pd.DataFrame(corr.astype(float), index=labels, columns=labels)
+    max_show = 60
+    if len(labels) > max_show:
+        st.info(f"Universe large ({len(labels)} vaults) → showing top {max_show} by TVL.")
+        top_idx = uni["tvlUsd"].astype(float).sort_values(ascending=False).index[:max_show]
+        corr_df = corr_df.iloc[top_idx, top_idx]
+
+    heat = px.imshow(
+        corr_df.values, x=corr_df.columns, y=corr_df.index,
+        zmin=-1, zmax=1, color_continuous_scale="RdBu", origin="lower",
+        title="Vault Correlation Matrix (simulated by category)"
+    )
+    heat.update_xaxes(tickfont=dict(size=9), automargin=True)
+    heat.update_yaxes(tickfont=dict(size=9), automargin=True)
+    st.plotly_chart(heat, use_container_width=True)
+
+    w_safe = w_card[w_card > 0] if 'w_card' in locals() else np.array([])
+    entropy = (-np.sum(w_safe * np.log(w_safe)) / np.log(len(w_card))) if len(w_safe) > 0 else 0.0
+    W = np.outer(w_card, w_card) if 'w_card' in locals() else np.zeros_like(corr)
+    mean_corr = float((corr.astype(float) * W).sum()) if W.size else 0.0
 
     st.markdown(f"""
 **Diversity Metrics**
@@ -354,4 +376,4 @@ with tab3:
 - Interpretation: higher entropy & lower mean corr = better diversification.
 """)
 
-st.caption("Each vault’s APY is discounted by its category’s sensitivity to selected counterparty risks. CAL reflects the adjusted risk-free rate (rfₐ).")
+st.caption("Each vault’s APY is discounted by its category’s sensitivity to selected counterparty risks. CAL visibility is optional.")
