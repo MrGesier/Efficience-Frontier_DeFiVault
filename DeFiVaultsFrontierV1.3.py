@@ -11,7 +11,7 @@ import time
 # CONFIG
 # =========================================================
 st.set_page_config(page_title="DeFi Vaults Efficient Frontier", layout="wide")
-st.title("📈 DeFi Vaults Efficient Frontier")
+st.title("📈 DeFi Vaults Efficient Frontier (Counterparty-Adjusted)")
 st.caption("by **Mr_Gesier | Nomiks**")
 
 API_POOLS = "https://yields.llama.fi/pools"
@@ -110,6 +110,27 @@ COLOR_MAP = {
 }
 
 # =========================================================
+# COUNTERPARTY RISK SENSITIVITIES
+# =========================================================
+CATEGORY_RISK_MATRIX = {
+    "Stablecoin":     {"depeg":1.0, "custodian":0.3, "bridge":0.2, "infra":0.2, "liquidity":0.1, "governance":0.2},
+    "BTC":            {"depeg":0.0, "custodian":0.1, "bridge":0.3, "infra":0.2, "liquidity":0.2, "governance":0.1},
+    "ETH / LSD":      {"depeg":0.0, "custodian":0.0, "bridge":0.1, "infra":0.3, "liquidity":0.2, "governance":0.2},
+    "LP / Farming":   {"depeg":0.2, "custodian":0.0, "bridge":0.3, "infra":0.3, "liquidity":0.4, "governance":0.2},
+    "Structured / Credit": {"depeg":0.1, "custodian":0.6, "bridge":0.1, "infra":0.2, "liquidity":0.2, "governance":0.4}
+}
+
+def adjust_vault_returns(df, penalties, alpha=0.5):
+    adj_returns = []
+    for _, r in df.iterrows():
+        cat = r["category"]
+        sens = CATEGORY_RISK_MATRIX.get(cat, {})
+        crf = sum(sens.get(k,0)*penalties.get(k,0) for k in penalties)
+        adj_returns.append(r["mean_return"] * (1 - alpha*crf))
+    df["mean_return_adj"] = adj_returns
+    return df
+
+# =========================================================
 # LOAD DATA
 # =========================================================
 snap = fetch_pools(MAX_VAULTS)
@@ -127,7 +148,6 @@ data["volatility"] = np.clip(data["volatility"], 0, 0.3)
 # =========================================================
 with st.sidebar:
     st.header("⚙️ Interactive Controls")
-
     cats = sorted(data["category"].unique().tolist())
     selected_cats = st.multiselect("Filter by Category", cats, default=cats)
     uni = data[data["category"].isin(selected_cats)].copy()
@@ -146,18 +166,18 @@ with st.sidebar:
 # COUNTERPARTY RISK ADJUSTMENT
 # =========================================================
 st.sidebar.markdown("---")
-st.sidebar.subheader("🧱 Counterparty Risks (adjust risk-free rate)")
+st.sidebar.subheader("🧱 Counterparty Risks (adjust rfₐ and vault returns)")
 
-with st.sidebar.expander("Select risk factors to apply", expanded=False):
+with st.sidebar.expander("Select risk factors", expanded=False):
     col1, col2 = st.columns(2)
     with col1:
         depeg = st.checkbox("💸 Stablecoin Depeg", value=True)
-        custodian = st.checkbox("🏦 Custodian / CeFi exposure", value=False)
+        custodian = st.checkbox("🏦 Custodian / CeFi", value=False)
         bridge = st.checkbox("🌉 Bridge / Cross-chain", value=True)
     with col2:
-        infra = st.checkbox("⚙️ Infrastructure / Smart contract", value=True)
-        liquidity = st.checkbox("💧 Liquidity / TVL risk", value=False)
-        governance = st.checkbox("🗳 Governance / Oracle risk", value=False)
+        infra = st.checkbox("⚙️ Smart Contract / Infra", value=True)
+        liquidity = st.checkbox("💧 Liquidity / TVL", value=False)
+        governance = st.checkbox("🗳 Governance / Oracle", value=False)
 
 penalties = {
     "depeg": 0.01, "custodian": 0.005, "bridge": 0.007,
@@ -165,24 +185,24 @@ penalties = {
 }
 
 selected_risks, risk_penalty = [], 0
-if depeg: selected_risks.append("Stablecoin Depeg"); risk_penalty += penalties["depeg"]
-if custodian: selected_risks.append("Custodian / CeFi"); risk_penalty += penalties["custodian"]
-if bridge: selected_risks.append("Bridge / Cross-chain"); risk_penalty += penalties["bridge"]
-if infra: selected_risks.append("Infrastructure / Smart contract"); risk_penalty += penalties["infra"]
-if liquidity: selected_risks.append("Liquidity / TVL"); risk_penalty += penalties["liquidity"]
-if governance: selected_risks.append("Governance / Oracle"); risk_penalty += penalties["governance"]
+for label, active in {
+    "depeg": depeg, "custodian": custodian, "bridge": bridge,
+    "infra": infra, "liquidity": liquidity, "governance": governance
+}.items():
+    if active:
+        selected_risks.append(label)
+        risk_penalty += penalties[label]
 
 rf_adj = max((rf / 100) - risk_penalty, 0)
-st.sidebar.markdown(f"**Adjusted Risk-Free Rate (rfₐ): `{rf_adj*100:.2f}%`**")
-if selected_risks:
-    st.sidebar.markdown("**Active Risk Factors:**")
-    for r in selected_risks:
-        st.sidebar.markdown(f"- {r}")
+st.sidebar.markdown(f"**Adjusted Risk-Free (rfₐ): `{rf_adj*100:.2f}%`**")
+
+# Adjust vault returns based on selected risks
+uni = adjust_vault_returns(uni, penalties)
 
 # =========================================================
 # DIVERSITY-AWARE COVARIANCE
 # =========================================================
-mu = uni["mean_return"].values
+mu = uni["mean_return_adj"].values
 sigma = uni["volatility"].values
 base_cov = np.diag(sigma**2)
 cats_arr = uni["category"].values
@@ -225,7 +245,7 @@ for tr in tgrid:
     front.append((r,v))
 frontier_df=pd.DataFrame(front,columns=["return","vol"])
 
-N=1500
+N=1000
 rw=np.random.dirichlet(np.ones(len(mu)),size=N)
 r_ret=rw@mu
 r_vol=np.sqrt(np.einsum('ij,jk,ik->i',rw,adj_cov,rw))
@@ -244,28 +264,27 @@ y_line=rf_dec + (tangent["return"]-rf_dec)/tangent["vol"]*x_line
 # =========================================================
 # LAYOUT
 # =========================================================
-tab1, tab2, tab3 = st.tabs(["📉 Frontier & Portfolio", "🎲 Random Portfolios", "🧩 Correlations & Diversity"])
+tab1, tab2 = st.tabs(["📉 Frontier & Portfolio", "🎲 Random Portfolios"])
 
-# --- FRONTIER ---
 with tab1:
     fig=px.scatter(
-        uni,x=uni["volatility"]*100,y=uni["mean_return"]*100,
+        uni,x=uni["volatility"]*100,y=uni["mean_return_adj"]*100,
         color="category",color_discrete_map=COLOR_MAP,size="tvlUsd",
         hover_data=["name","project","chain","symbol","tvlUsd"],
-        labels={"x":"Risk (Volatility %)","y":"Expected Return (APY %)"},
-        title="DeFi Vaults — Efficient Frontier with CAL"
+        labels={"x":"Risk (Volatility %)","y":"Expected Return (Adj. APY %)"},
+        title="DeFi Vaults — Efficient Frontier (Counterparty Adjusted)"
     )
     fig.add_scatter(x=frontier_df["vol"]*100,y=frontier_df["return"]*100,
                     mode="lines+markers",name="Efficient Frontier",
                     line=dict(color="red",width=2))
     fig.add_scatter(x=x_line*100,y=y_line*100,mode="lines",
-                    name="Capital Allocation Line (CAL)",
+                    name="CAL (risk-free adjusted)",
                     line=dict(color="black",width=3))
     st.plotly_chart(fig,use_container_width=True)
 
-    with st.expander("🧾 Vault Universe (Full List)", expanded=False):
+    with st.expander("🧾 Vault Universe (Adjusted Returns)", expanded=False):
         st.dataframe(
-            uni[["name","project","chain","symbol","category","tvlUsd","mean_return","volatility"]],
+            uni[["name","project","category","tvlUsd","mean_return","mean_return_adj","volatility"]],
             use_container_width=True,hide_index=True
         )
 
@@ -286,51 +305,30 @@ with tab1:
     tangent_sharpe=(tangent["return"]-rf_dec)/tangent["vol"]
 
     st.subheader("💰 Optimal Portfolio")
-    st.dataframe(out[["name","project","category","Weight","Allocation (USD)","mean_return","volatility"]],
+    st.dataframe(out[["name","project","category","Weight","Allocation (USD)","mean_return_adj","volatility"]],
                  use_container_width=True,hide_index=True)
 
     st.markdown(f"""
 ### 🧭 Portfolio Summary
 - **Total Investment:** ${total_invest:,.0f}
-- **Target Return (input):** {target_return_pct:.2f}%
-- **Optimized Return:** {port_r*100:.2f}%
+- **Optimized Return (Adj.):** {port_r*100:.2f}%
 - **Volatility:** {port_v*100:.2f}%
 - **Sharpe (tangent):** {tangent_sharpe:.2f}
 - **Vaults Selected:** {(out["Weight"]>0.001).sum()} / {K}
-- **Base Risk-Free Rate:** {rf:.2f}%
-- **Risk Penalty Applied:** {risk_penalty*100:.2f}%
 - **Adjusted Risk-Free (rfₐ):** {rf_adj*100:.2f}%
 - **Active Risks:** {', '.join(selected_risks) if selected_risks else 'None'}
 - **Diversity Preference:** {diversity_pref:.2f}
 - **Last Updated:** {datetime.utcnow().strftime('%Y-%m-%d %H:%M UTC')}
 """)
 
-# --- RANDOM PORTFOLIO SIMULATION ---
 with tab2:
     fig_rand=px.scatter(rand_df,x="volatility",y="return",
-        title="Random Portfolios Simulation — Risk vs Return",
-        labels={"volatility":"Risk (Volatility %)","return":"Expected Return (APY %)"},
+        title="Random Portfolios — Risk vs Return (Adj.)",
+        labels={"volatility":"Risk (Volatility %)","return":"Expected Return (Adj. APY %)"},
         opacity=0.6,color_discrete_sequence=["orange"])
     fig_rand.add_scatter(x=frontier_df["vol"]*100,y=frontier_df["return"]*100,
                          mode="lines",name="Efficient Frontier",
                          line=dict(color="red",width=2))
     st.plotly_chart(fig_rand,use_container_width=True)
-    st.caption("Orange points = randomly generated portfolios. Red curve = efficient frontier.")
 
-# --- CORRELATION TAB ---
-with tab3:
-    corr_df=pd.DataFrame(corr,index=uni["name"],columns=uni["name"])
-    heat=px.imshow(corr_df,aspect="auto",color_continuous_scale="RdBu",origin="lower")
-    st.plotly_chart(heat,use_container_width=True)
-    w_safe=w_card[w_card>0]
-    entropy=-np.sum(w_safe*np.log(w_safe))/np.log(len(w_card))
-    W=np.outer(w_card,w_card)
-    mean_corr=float((corr*W).sum())
-    st.markdown(f"""
-**Diversity Index**
-- Entropy (0–1): `{entropy:.3f}`
-- Weighted Mean Correlation: `{mean_corr:.3f}`
-- Interpretation: higher entropy & lower mean corr = better diversification.
-""")
-
-st.caption("All APYs > 50% are capped for scale realism. CAL reflects adjusted risk-free (rfₐ) accounting for selected counterparty risks.")
+st.caption("Each vault’s APY is discounted by its category’s sensitivity to selected counterparty risks. CAL reflects the adjusted risk-free rate (rfₐ).")
