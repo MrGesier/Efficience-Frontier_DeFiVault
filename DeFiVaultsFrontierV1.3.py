@@ -121,12 +121,14 @@ CATEGORY_RISK_MATRIX = {
 }
 
 def adjust_vault_returns(df, penalties, alpha=0.5):
-    adj_returns = []
+    adj_returns, crf_list = [], []
     for _, r in df.iterrows():
         cat = r["category"]
         sens = CATEGORY_RISK_MATRIX.get(cat, {})
         crf = sum(sens.get(k,0)*penalties.get(k,0) for k in penalties)
         adj_returns.append(r["mean_return"] * (1 - alpha*crf))
+        crf_list.append(crf)
+    df["CRF"] = crf_list
     df["mean_return_adj"] = adj_returns
     return df
 
@@ -160,7 +162,7 @@ with st.sidebar:
     diversity_pref = st.slider("🌈 Diversity Preference", 0.0, 1.0, 0.5)
     max_assets = st.slider("📦 Max Assets", 3, min(25, max(3,len(uni))), 8)
     total_invest = st.number_input("💵 Total Investment (USD)", min_value=1000, max_value=1_000_000, value=50_000)
-    rf = st.number_input("Base Risk-Free Rate (%)", min_value=0.0, max_value=20.0, value=5.0, step=0.5)
+    rf = st.number_input("Base Risk-Free Rate (%)", min_value=0.0, max_value=50.0, value=15.0, step=0.5)
 
 # =========================================================
 # COUNTERPARTY RISK ADJUSTMENT
@@ -264,13 +266,14 @@ y_line=rf_dec + (tangent["return"]-rf_dec)/tangent["vol"]*x_line
 # =========================================================
 # LAYOUT
 # =========================================================
-tab1, tab2 = st.tabs(["📉 Frontier & Portfolio", "🎲 Random Portfolios"])
+tab1, tab2, tab3 = st.tabs(["📉 Frontier & Portfolio", "🎲 Random Portfolios", "🧩 Correlations & Diversity"])
 
+# --- TAB 1 ---
 with tab1:
     fig=px.scatter(
         uni,x=uni["volatility"]*100,y=uni["mean_return_adj"]*100,
         color="category",color_discrete_map=COLOR_MAP,size="tvlUsd",
-        hover_data=["name","project","chain","symbol","tvlUsd"],
+        hover_data=["name","project","chain","symbol","tvlUsd","CRF"],
         labels={"x":"Risk (Volatility %)","y":"Expected Return (Adj. APY %)"},
         title="DeFi Vaults — Efficient Frontier (Counterparty Adjusted)"
     )
@@ -284,7 +287,7 @@ with tab1:
 
     with st.expander("🧾 Vault Universe (Adjusted Returns)", expanded=False):
         st.dataframe(
-            uni[["name","project","category","tvlUsd","mean_return","mean_return_adj","volatility"]],
+            uni[["name","project","category","tvlUsd","mean_return","mean_return_adj","volatility","CRF"]],
             use_container_width=True,hide_index=True
         )
 
@@ -305,7 +308,7 @@ with tab1:
     tangent_sharpe=(tangent["return"]-rf_dec)/tangent["vol"]
 
     st.subheader("💰 Optimal Portfolio")
-    st.dataframe(out[["name","project","category","Weight","Allocation (USD)","mean_return_adj","volatility"]],
+    st.dataframe(out[["name","project","category","Weight","Allocation (USD)","mean_return_adj","volatility","CRF"]],
                  use_container_width=True,hide_index=True)
 
     st.markdown(f"""
@@ -321,6 +324,7 @@ with tab1:
 - **Last Updated:** {datetime.utcnow().strftime('%Y-%m-%d %H:%M UTC')}
 """)
 
+# --- TAB 2 ---
 with tab2:
     fig_rand=px.scatter(rand_df,x="volatility",y="return",
         title="Random Portfolios — Risk vs Return (Adj.)",
@@ -330,5 +334,24 @@ with tab2:
                          mode="lines",name="Efficient Frontier",
                          line=dict(color="red",width=2))
     st.plotly_chart(fig_rand,use_container_width=True)
+
+# --- TAB 3 ---
+with tab3:
+    st.subheader("🧩 Correlation Matrix (category-aware)")
+    corr_df=pd.DataFrame(corr,index=uni["name"],columns=uni["name"])
+    heat=px.imshow(corr_df,aspect="auto",color_continuous_scale="RdBu",origin="lower",title="Vault Correlation Matrix")
+    st.plotly_chart(heat,use_container_width=True)
+
+    w_safe=w_card[w_card>0]
+    entropy=-np.sum(w_safe*np.log(w_safe))/np.log(len(w_card)) if len(w_card)>0 else 0
+    W=np.outer(w_card,w_card)
+    mean_corr=float((corr*W).sum()) if W.size else 0
+
+    st.markdown(f"""
+**Diversity Metrics**
+- Entropy (0–1): `{entropy:.3f}`
+- Weighted Mean Correlation: `{mean_corr:.3f}`
+- Interpretation: higher entropy & lower mean corr = better diversification.
+""")
 
 st.caption("Each vault’s APY is discounted by its category’s sensitivity to selected counterparty risks. CAL reflects the adjusted risk-free rate (rfₐ).")
